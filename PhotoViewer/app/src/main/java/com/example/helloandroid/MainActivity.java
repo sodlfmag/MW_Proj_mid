@@ -11,9 +11,11 @@ import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -23,6 +25,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -40,13 +43,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "MainActivity";
     private static final int MY_PERMISSIONS_REQUEST_WRITE_EXTERNAL_STORAGE = 1;
     private static final int REQUEST_IMAGE_PICK = 2;
     
     ImageView imgView;
     TextView textView;
+    ProgressBar progressBar;
+    SwipeRefreshLayout swipeRefreshLayout;
     // 에뮬레이터: 10.0.2.2, 실제 기기: PC의 IP 주소로 변경 필요 (예: 192.168.0.5)
-    String site_url = "http://10.0.2.2:8000";
+    // String site_url = "http://10.0.2.2:8000";
+    String site_url = "https://sodlfmag.pythonanywhere.com";
     JSONObject post_json;
     String imageUrl = null;
     Bitmap bmImg = null;
@@ -56,15 +63,84 @@ public class MainActivity extends AppCompatActivity {
     // Upload에 사용할 변수
     private Uri selectedImageUri;
     private Bitmap selectedBitmap;
+    
+    // Post 데이터 리스트
+    private List<PostData> postDataList;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Log.d(TAG, "onCreate 호출됨");
         setContentView(R.layout.activity_main);
         textView = findViewById(R.id.textView);
+        progressBar = findViewById(R.id.progressBar);
+        swipeRefreshLayout = findViewById(R.id.swipeRefreshLayout);
+        
+        // Pull-to-Refresh 설정
+        swipeRefreshLayout.setOnRefreshListener(new SwipeRefreshLayout.OnRefreshListener() {
+            @Override
+            public void onRefresh() {
+                onClickDownload(null);
+            }
+        });
         
         // 권한 확인
         checkPermissions();
+        
+        // 저장된 데이터가 있으면 복원
+        if (savedInstanceState != null && postDataList != null && !postDataList.isEmpty()) {
+            Log.d(TAG, "onCreate: 저장된 데이터 복원 시도");
+            restoreRecyclerView();
+        } else {
+            Log.d(TAG, "onCreate: 저장된 데이터 없음. postDataList=" + (postDataList == null ? "null" : "size=" + postDataList.size()));
+        }
+    }
+    
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Log.d(TAG, "onResume 호출됨. postDataList=" + (postDataList == null ? "null" : "size=" + postDataList.size()));
+        // 다른 Activity에서 돌아왔을 때 데이터 복원
+        if (postDataList != null && !postDataList.isEmpty()) {
+            Log.d(TAG, "onResume: 데이터 복원 시도");
+            restoreRecyclerView();
+        } else {
+            Log.w(TAG, "onResume: postDataList가 null이거나 비어있음");
+        }
+    }
+    
+    @Override
+    protected void onPause() {
+        super.onPause();
+        Log.d(TAG, "onPause 호출됨");
+    }
+    
+    @Override
+    protected void onStop() {
+        super.onStop();
+        Log.d(TAG, "onStop 호출됨");
+    }
+    
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Log.d(TAG, "onDestroy 호출됨");
+    }
+    
+    private void restoreRecyclerView() {
+        Log.d(TAG, "restoreRecyclerView 호출됨");
+        RecyclerView recyclerView = findViewById(R.id.recyclerView);
+        if (recyclerView != null && postDataList != null && !postDataList.isEmpty()) {
+            Log.d(TAG, "RecyclerView 복원 중. 데이터 개수: " + postDataList.size());
+            ImageAdapter adapter = new ImageAdapter(postDataList);
+            recyclerView.setLayoutManager(new LinearLayoutManager(this));
+            recyclerView.setAdapter(adapter);
+            textView.setText("이미지 로드 성공! (" + postDataList.size() + "개)");
+            Log.d(TAG, "RecyclerView 복원 완료");
+        } else {
+            Log.w(TAG, "RecyclerView 복원 실패. recyclerView=" + (recyclerView == null ? "null" : "not null") + 
+                    ", postDataList=" + (postDataList == null ? "null" : "size=" + postDataList.size()));
+        }
     }
     
     private void checkPermissions() {
@@ -158,10 +234,17 @@ public class MainActivity extends AppCompatActivity {
         builder.show();
     }
     
-    private class CloadImage extends AsyncTask<String, Integer, List<Bitmap>> {
+    private class CloadImage extends AsyncTask<String, Integer, List<PostData>> {
         @Override
-        protected List<Bitmap> doInBackground(String... urls) {
-            List<Bitmap> bitmapList = new ArrayList<>();
+        protected void onPreExecute() {
+            super.onPreExecute();
+            progressBar.setVisibility(View.VISIBLE);
+            textView.setText("이미지를 불러오는 중...");
+        }
+        
+        @Override
+        protected List<PostData> doInBackground(String... urls) {
+            List<PostData> postList = new ArrayList<>();
             try {
                 String apiUrl = urls[0];
                 String token = "e79ef213eae997b907ae570486118e9486e51662";
@@ -192,17 +275,21 @@ public class MainActivity extends AppCompatActivity {
                         aryJson = new JSONArray(strJson);
                     }
                     
-                    // 배열 내 모든 이미지 다운로드
+                    // 배열 내 모든 이미지 다운로드 및 메타데이터 저장
                     for (int i = 0; i < aryJson.length(); i++) {
                         post_json = (JSONObject) aryJson.get(i);
                         imageUrl = post_json.optString("image", null);
+                        String title = post_json.optString("title", "");
+                        String text = post_json.optString("text", "");
+                        
                         if (imageUrl != null && !imageUrl.equals("null") && !imageUrl.isEmpty()) {
                             URL myImageUrl = new URL(imageUrl);
                             conn = (HttpURLConnection) myImageUrl.openConnection();
                             InputStream imgStream = conn.getInputStream();
                             Bitmap imageBitmap = BitmapFactory.decodeStream(imgStream);
                             if (imageBitmap != null) {
-                                bitmapList.add(imageBitmap); // 이미지 리스트에 추가
+                                PostData postData = new PostData(imageBitmap, title, text, imageUrl);
+                                postList.add(postData); // 포스트 데이터 리스트에 추가
                             }
                             imgStream.close();
                         }
@@ -211,24 +298,41 @@ public class MainActivity extends AppCompatActivity {
             } catch (IOException | JSONException e) {
                 e.printStackTrace();
             }
-            return bitmapList;
+            return postList;
         }
         
         @Override
-        protected void onPostExecute(List<Bitmap> images) {
-            if (images.isEmpty()) {
+        protected void onPostExecute(List<PostData> posts) {
+            progressBar.setVisibility(View.GONE);
+            swipeRefreshLayout.setRefreshing(false);
+            postDataList = posts;
+            Log.d(TAG, "CloadImage 완료. 데이터 개수: " + (posts != null ? posts.size() : 0));
+            if (posts == null || posts.isEmpty()) {
                 textView.setText("불러올 이미지가 없습니다.");
+                Log.w(TAG, "이미지 데이터가 비어있음");
             } else {
-                textView.setText("이미지 로드 성공!");
+                textView.setText("이미지 로드 성공! (" + posts.size() + "개)");
                 RecyclerView recyclerView = findViewById(R.id.recyclerView);
-                ImageAdapter adapter = new ImageAdapter(images);
-                recyclerView.setLayoutManager(new LinearLayoutManager(MainActivity.this));
-                recyclerView.setAdapter(adapter);
+                if (recyclerView != null) {
+                    ImageAdapter adapter = new ImageAdapter(posts);
+                    recyclerView.setLayoutManager(new LinearLayoutManager(MainActivity.this));
+                    recyclerView.setAdapter(adapter);
+                    Log.d(TAG, "RecyclerView 어댑터 설정 완료");
+                } else {
+                    Log.e(TAG, "RecyclerView가 null입니다!");
+                }
             }
         }
     }
     
     private class PutPost extends AsyncTask<String, Void, Boolean> {
+        @Override
+        protected void onPreExecute() {
+            super.onPreExecute();
+            progressBar.setVisibility(View.VISIBLE);
+            textView.setText("업로드 중...");
+        }
+        
         @Override
         protected Boolean doInBackground(String... params) {
             String title = params[0];
@@ -301,12 +405,15 @@ public class MainActivity extends AppCompatActivity {
         
         @Override
         protected void onPostExecute(Boolean success) {
+            progressBar.setVisibility(View.GONE);
             if (success) {
                 Toast.makeText(getApplicationContext(), "Upload 성공!", Toast.LENGTH_LONG).show();
                 selectedBitmap = null;
                 selectedImageUri = null;
+                textView.setText("업로드 완료! 동기화 버튼을 눌러 확인하세요.");
             } else {
                 Toast.makeText(getApplicationContext(), "Upload 실패", Toast.LENGTH_LONG).show();
+                textView.setText("업로드 실패. 다시 시도해주세요.");
             }
         }
     }
